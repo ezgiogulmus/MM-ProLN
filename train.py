@@ -16,37 +16,18 @@ pd.options.mode.chained_assignment = None
 
 def main(config=None):
     if config is None:
-        initial_config = {
-            "data_folder": "./data/",
-            "image_folder": "./data/ProstateData/",
-            'train_file': "./data/training.csv",
-            'test_file': "./data/testing.csv",
-            "batch_size": 16,
-            "val_batch_size": 8,
-            "image_size": 256,
-            "early_stopping": 30,
-            "cross_validation": -1,
-            "lr_scheduler": "ReduceLROnPlateau",
-            "epochs": 100,
-            "wandb": True,
-            "debugging": False,
-            "normalization": True,
-            "pretrained": False,
-            "transform": True,
-            "crop": True,
-            "load_from": None
-        }
-        wandb.init(config=initial_config) 
+        wandb.init(config=vars(parse_args()))
         config = wandb.config
         config["model_dir"] = wandb.run.dir
         print("Model directory is ", config["model_dir"])
         
     else:
+        config["run_name"] = config["backbone"] + "_" + config["image_data"] + "_" + config["image_fusion"] + "_" + config["fusion_method"] + "_" + config["clinical_group"] + "_" + config["mm_fusion"] + config["run_name"]
         # Create directory for the run
-        config['train_file'] = config["data_folder"]+'training.csv'
-        config['test_file'] = config["data_folder"]+'testing.csv'
         config = utils.create_run(config)
-    print(config["train_file"])
+    config['train_file'] = config["data_folder"]+'training.csv'
+    config['test_file'] = config["data_folder"]+'testing.csv'
+    # print(config["train_file"])
     data = ProstateData(config)
     train_df, test_df = data.selected_feats(config["clinical_group"])
     config = data.config
@@ -68,9 +49,9 @@ def main(config=None):
         model, optimizer, criterion, scheduler = networks.get_model(config)
         if cv == 1:
             print(model)
-        if config["load_from"] and os.path.isfile(os.path.join(config["load_from"], f"bestmodel_auc{cv}.pth")):
-            model.load_state_dict(torch.load(os.path.join(config["load_from"], f"bestmodel_auc{cv}.pth")))
-            print("Loaded model from: ", os.path.join(config["load_from"], f"bestmodel_auc{cv}.pth"))
+        if config["load_from"] and os.path.isfile(os.path.join(config["load_from"], f"bestmodel{cv}.pth")):
+            model.load_state_dict(torch.load(os.path.join(config["load_from"], f"bestmodel{cv}.pth")))
+            print("Loaded model from: ", os.path.join(config["load_from"], f"bestmodel{cv}.pth"))
             eval_mode = True
         # Load clinical data and normalize
         if config["cli_size"] != 0:
@@ -93,6 +74,7 @@ def main(config=None):
         log = None
         best_auc, best_acc, trigger = 0, 0, 0
         best_loss = np.inf
+        best_log = None
 
         if eval_mode:
             val_log, val_preds = utils.loop(config, val_loader, model, criterion, training=False, return_preds=True, threshold=config["threshold_for_class1"])
@@ -165,28 +147,17 @@ def main(config=None):
             elif config['lr_scheduler'] == 'ReduceLROnPlateau':
                 scheduler.step(val_log['loss'])
 
-            if epoch > 5:
+            if epoch > 3:
                 trigger += 1
-                
-                if val_log["auc"] - best_auc > .01 and best_acc - val_log["acc"] < .05:
-                    torch.save(model.state_dict(), os.path.join(config["model_dir"], f"bestmodel_auc{cv}.pth"))
-                    best_auc = val_log["auc"]
+                if val_log["loss"] < best_loss and val_log["acc"] > .7 and val_log["auc"] > .7:
+                    torch.save(model.state_dict(), os.path.join(config["model_dir"], f"bestmodel{cv}.pth"))
+                    best_loss = val_log["loss"]
                     
                     best_log_keys = ["best_val_"+k for k, v in val_log.items()]
-                    best_log_auc = [v for k, v in val_log.items()]
+                    best_log = [v for k, v in val_log.items()]
                     
-                    print("=> saved model with the best auc")
+                    print("=> saved model with the best loss")
                     trigger = 0
-                
-                if val_log["acc"] - best_acc > .01 and best_auc - val_log["auc"] < .05:
-                    torch.save(model.state_dict(), os.path.join(config["model_dir"], f"bestmodel_acc{cv}.pth"))
-                    best_acc = val_log["acc"]
-                    
-                    best_log_keys = ["best_val_"+k for k, v in val_log.items()]
-                    best_log_acc = [v for k, v in val_log.items()]
-                    
-                    print("=> saved model with the best acc")
-
 
                 elif config['early_stopping'] >= 0:
                     print('early stopping count: ', trigger, '/', config['early_stopping'])
@@ -198,40 +169,30 @@ def main(config=None):
 
             torch.cuda.empty_cache()
         
-        # Best auc model
-        model.load_state_dict(torch.load(os.path.join(config["model_dir"], f"bestmodel_auc{cv}.pth")))
+        if best_log is None:
+            best_log_keys = ["best_val_"+k for k, v in val_log.items()]
+            best_log = [v for k, v in val_log.items()]
+            torch.save(model.state_dict(), os.path.join(config["model_dir"], f"bestmodel{cv}.pth"))
+        else:
+            model.load_state_dict(torch.load(os.path.join(config["model_dir"], f"bestmodel{cv}.pth")))
         test_log = utils.loop(config, test_loader, model, criterion, training=False, threshold=config["threshold_for_class1"])
+        
         print("Test results:")
         for k, v in test_log.items():
-            best_log_auc.append(v)
+            best_log.append(v)
             best_log_keys.append("test_"+k)
             print("\t", k, ": ", round(v, 4))
         
         if config["wandb"]:
-            wandb.log({k: v for k, v in list(zip(best_log_keys, best_log_auc))})
+            wandb.log({k: v for k, v in list(zip(best_log_keys, best_log))})
 
         else:
-            cv_output_auc.append(best_log_auc)
+            cv_output_auc.append(best_log)
             pd.DataFrame(cv_output_auc, columns=best_log_keys).to_csv(os.path.join(config["model_dir"], "cv_output_auc.csv"), index=False)
         
-        # Best acc model
-        model.load_state_dict(torch.load(os.path.join(config["model_dir"], f"bestmodel_acc{cv}.pth")))
-        test_log = utils.loop(config, test_loader, model, criterion, training=False, threshold=config["threshold_for_class1"])
-        print("Test results:")
-        for k, v in test_log.items():
-            best_log_acc.append(v)
-            print("\t", k, ": ", round(v, 4))
-        
-        if config["wandb"]:
-            wandb.log({k: v for k, v in list(zip(best_log_keys, best_log_acc))})
-
-        else:
-            cv_output_acc.append(best_log_acc)
-            pd.DataFrame(cv_output_acc, columns=best_log_keys).to_csv(os.path.join(config["model_dir"], "cv_output_acc.csv"), index=False)
-        
-
         if config["cross_validation"] < 0:
             break
+        torch.cuda.empty_cache()
 
 
 def parse_args():
@@ -245,15 +206,19 @@ def parse_args():
     parser.add_argument('--image_folder', default="./data/ProstateData/")
     parser.add_argument('--load_from', default=None)
 
-    parser.add_argument('--class_weight', default=None, type=float)
-    parser.add_argument('--image_size', default=256, type=int)
-    parser.add_argument('--z_dim', default=32, type=int)
+    parser.add_argument('--class_weight', default=2, type=float)
+    parser.add_argument('--image_size', default=64, type=int)
+    # parser.add_argument('--z_dim', default=32, type=int)
     
     parser.add_argument('--activation', default='leaky_relu', choices=["relu", "leaky_relu", "gelu"])
-    parser.add_argument('--backbone', default="small", choices=['small', 'resnet18', "resnet50", "densenet", "mobilenet"])
+    parser.add_argument('--fe1_depth', default=2, type=int)
+    parser.add_argument('--fusion_method', default="average", choices=["concat", "adaptive", "pet_weighted", "ct_weighted", "average", "multiply"])
+    parser.add_argument('--mm_fusion', default="concat", choices=["concat", "adaptive", "multiply", "summation"])
+    parser.add_argument('--image_fusion', default="early", choices=["early", "mid", "late"])
+    parser.add_argument('--backbone', default="small", choices=['small', 'vit', "swin", "resnet", "densenet", "mobilenet"])
     parser.add_argument('--pretrained', default=True, action='store_false')
     parser.add_argument('--clinical_group', default="clinical+pet", choices=["None", "clinical", "clinical+radiomics", "clinical+pet", "clinical+ct"])
-    parser.add_argument('--image_data', default="pet", choices=["pet", "ct", "pet+ct"])
+    parser.add_argument('--image_data', default="pet+ct", choices=["pet", "ct", "pet+ct", "None"])
 
     parser.add_argument('--transform', default=True, action='store_false')
     parser.add_argument('--crop', default=True, action='store_false')
@@ -261,15 +226,15 @@ def parse_args():
     parser.add_argument('--batch_size', default=8, type=int)
     parser.add_argument('--val_batch_size', default=8, type=int)
 
-    parser.add_argument('--epochs', default=100, type=int)
-    parser.add_argument("--cross_validation", default=5, type=int)
+    parser.add_argument('--epochs', default=50, type=int)
+    parser.add_argument("--cross_validation", default=-1, type=int)
     
     parser.add_argument('--optimizer', default='SGD', choices=['Adam', 'SGD'])
     parser.add_argument('--learning_rate', default=0.027, type=float)
     parser.add_argument('--lr_scheduler', default="ReduceLROnPlateau", choices=['CosineAnnealingLR', 'ReduceLROnPlateau', "ConstantLR"])
     parser.add_argument('--l2_reg', default=0.027, type=float)
-    parser.add_argument('--early_stopping', default=30, type=int)
-    parser.add_argument('--threshold_for_class1', default=.5, type=float)
+    parser.add_argument('--early_stopping', default=20, type=int)
+    parser.add_argument('--threshold_for_class1', default=.7, type=float)
     
     config = parser.parse_args()
 
@@ -296,10 +261,10 @@ if __name__ == '__main__':
         
         parameter_dict = {
             "backbone": {
-                "values": ["small", "mobilenet", "resnet18"]
+                "values": ['small', "swin", "resnet", "densenet", "mobilenet"]
             },
-            "z_dim": {
-                "values": [8, 16, 32, 64]
+            "image_fusion": {
+                "values": ["early", "mid", "late"]
             },
             'class_weight': {
                 'values': [None, 3, 5]
@@ -307,15 +272,15 @@ if __name__ == '__main__':
             "activation": {
                 "values": ["leaky_relu", "relu", "gelu"]
             },
-            # "pretrained": {
-            #     "values": [True, False]
-            # },
-            # "transform": {
-            #     "values": [True, False]
-            # },
-            # "crop": {
-            #     "values": [True, False]
-            # },
+            "fe1_depth": {
+                "values": [2, 3, 4]
+            },
+            "fusion_method": {
+                "values": ["concat", "pet_weighted", "ct_weighted", "average", "multiply"]
+            },
+            "mm_fusion": {
+                "values": ["concat", "adaptive", "multiply", "summation"]
+            },
             "clinical_group": {
                 "values": ["clinical", "clinical+radiomics", "clinical+pet", "clinical+ct"],
             },       
