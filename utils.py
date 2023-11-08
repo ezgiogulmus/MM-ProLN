@@ -13,6 +13,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 from sklearn.metrics import matthews_corrcoef, accuracy_score, f1_score, recall_score, roc_auc_score, precision_score
 # from torcheval.metrics import AUC, 
 from torcheval.metrics import BinaryAccuracy, BinaryAUROC
+from torch.nn.utils import clip_grad_norm_
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -31,8 +32,8 @@ def compute_all_scores(preds):
     y_pred = np.array([y>.5 for y in y_pred])
     y_true = np.array(y_true)
     
-    scores['accuracy'] = accuracy_score(y_true, y_pred)
-    scores['precision'] = precision_score(y_true, y_pred)
+    scores['acc'] = accuracy_score(y_true, y_pred)
+    scores['prec'] = precision_score(y_true, y_pred)
     scores['recall'] = recall_score(y_true, y_pred)
     scores['f1'] = f1_score(y_true, y_pred)
     scores['mcc'] = matthews_corrcoef(y_true, y_pred)
@@ -43,8 +44,8 @@ def compute_all_scores(preds):
     fp = np.sum((y_true == 0) & (y_pred == 1))
     fn = np.sum((y_true == 1) & (y_pred == 0))
 
-    scores["specificity"] = tn / (tn + fp)
-    scores["sensitivity"] = tp / (tp + fn)
+    scores["spec"] = tn / (tn + fp)
+    scores["sens"] = tp / (tp + fn)
     return scores
 
 class AverageMeter(object):
@@ -91,23 +92,26 @@ def loop(config, loader, model, criterion, optimizer=None, training=True, return
 
         with torch.set_grad_enabled(training):
             output = model(inputs)
+            # print(list(zip(output.detach().cpu().numpy(), target.detach().cpu().numpy())))
             loss = criterion(output, target)
 
         if training:
             optimizer.zero_grad()
             loss.backward()
+            clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
         avg_meter.update(loss.item(), inputs[0].size(0))
         if config["class_weight"] is not None:
             output = torch.sigmoid(output)
         [all_outputs.append(o.item()) for o in output.detach().cpu()]
-    
-    log = {
-        "loss": avg_meter.avg,
-        "acc": accuracy_score(np.array(all_outputs)>threshold, all_targets),
-        "auc": roc_auc_score(all_targets, y_score=all_outputs),
-    }
+    log = compute_all_scores([all_targets, all_outputs])
+    log["loss"] = avg_meter.avg
+    # log = {
+    #     "loss": avg_meter.avg,
+    #     "acc": accuracy_score(np.array(all_outputs)>threshold, all_targets),
+    #     "auc": roc_auc_score(all_targets, y_score=all_outputs),
+    # }
     if return_preds:
         return log, [all_targets, all_outputs]
     return log

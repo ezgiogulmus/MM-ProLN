@@ -1,82 +1,13 @@
-from einops import rearrange
 import math
 import torch
+import numpy as np
 from torch import nn
 from torch.nn import functional as F
-from torchvision.models import resnet18, ResNet18_Weights, resnet50, ResNet50_Weights, densenet121, DenseNet121_Weights, mobilenet_v3_small, MobileNet_V3_Small_Weights
+from torchvision import models
 
-class PETModel(nn.Module):
-    def __init__(self, config):
-        super(PETModel, self).__init__()
-        self.config = config
-
-        self.pet = True if "pet" in config["image_data"] else False
-        self.ct = True if "ct" in config["image_data"] else False
-        self.cli = True if config["cli_size"] > 0 else False
-        
-        self.sigmoid = True if config["class_weight"] is None else False
-
-        self.slice_feats = FeatExZ(config)
-        self.backbone, last_chn = init_backbone(config["backbone"], config["pretrained"], config["z_dim"], config["activation"])
-        self.fc = nn.Linear(last_chn, 1, bias=True)
-
-        self.fc_cli1 = nn.Linear(config["cli_size"], int(config["image_size"]**2))
-        self.fc_cli2 = nn.Linear(config["cli_size"], int((config["image_size"]//32)**2))
-
-        self.avg_pooling = nn.AdaptiveAvgPool2d(1)
-        self.flat = nn.Flatten()
-        
-        if not config["pretrained"]:
-            self.apply(init_weights_he_normal)
-        
-    def forward(self, inputs, return_feats=False):
-        pet = inputs[0]
-        ct = inputs[1]
-        seg = inputs[2]
-        if self.cli:
-            cli = inputs[-1]
-
-        outputs = []
-        if self.pet:
-            pet = self.slice_feats(pet)
-        
-            if self.cli:
-                cli_vector = torch.unsqueeze(self.fc_cli1(cli), 1)
-                cli_vector = rearrange(cli_vector, "b c (h w) -> b c h w", h=pet.shape[-1])
-                pet = pet + cli_vector
-            pet = self.backbone(pet)
-            if self.cli:
-                cli_vector = torch.unsqueeze(self.fc_cli2(cli), 1)
-                cli_vector = rearrange(cli_vector, "b c (h w) -> b c h w", h=pet.shape[-1])
-                pet = pet + cli_vector
-            out = pet
-
-        if self.ct:
-            ct = self.slice_feats(ct)
-            if self.cli:
-                cli_vector = torch.unsqueeze(self.fc_cli1(cli), 1)
-                cli_vector = rearrange(cli_vector, "b c (h w) -> b c h w", h=ct.shape[-1])
-                ct = ct + cli_vector
-            ct = self.backbone(ct)
-            if self.cli:
-                cli_vector = torch.unsqueeze(self.fc_cli2(cli), 1)
-                cli_vector = rearrange(cli_vector, "b c (h w) -> b c h w", h=ct.shape[-1])
-                ct = ct + cli_vector
-            out = ct
-        
-        if self.ct and self.pet:
-            out = pet + ct
-
-        flat_out = self.flat(self.avg_pooling(out))
-        flat_out = self.fc(flat_out)
-        if self.sigmoid:
-            flat_out = torch.sigmoid(flat_out)
-        if return_feats:
-            return flat_out, out
-        return flat_out
 
 class FeatExZ(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, channels):
         super(FeatExZ, self).__init__()
         if config["activation"] == "relu":
             self.act_layer = nn.ReLU()
@@ -84,27 +15,89 @@ class FeatExZ(nn.Module):
             self.act_layer = nn.LeakyReLU()
         elif config["activation"] == "gelu":
             self.act_layer = nn.GELU()
+        
 
+        str_size = np.clip(math.floor(math.log2(200/config["fe1_depth"])), a_max=6, a_min=2)
         layers = []
         for i in range(config["fe1_depth"]):
-            layers.append(nn.Conv3d(1, 1, kernel_size=3, stride=(4, 1, 1), padding=1))
-            layers.append(nn.BatchNorm3d(1))
+            layers.append(nn.Conv3d(channels, channels, kernel_size=3, stride=(str_size, 1, 1), padding=1))
+            layers.append(nn.BatchNorm3d(channels))
             layers.append(self.act_layer)
-        self.from3d = nn.Sequential(
-            nn.Conv3d(1, 1, kernel_size=7, stride=(4, 1, 1), padding=3),
-            nn.BatchNorm3d(1),
-            self.act_layer,
-            nn.Conv3d(1, 1, kernel_size=5, stride=(4, 1, 1), padding=2),
-            nn.BatchNorm3d(1),
-            self.act_layer
-        )
-        self.avg_pooling = nn.AdaptiveAvgPool3d((config["z_dim"], config["image_size"], config["image_size"]))
+        self.from3d = nn.Sequential(*layers)
+        self.avg_pooling = nn.AdaptiveAvgPool3d((1, config["image_size"], config["image_size"]))
         self.apply(init_weights_he_normal)
 
     def forward(self, x):
         x = self.from3d(x)
         x = self.avg_pooling(x)
-        return torch.squeeze(x)
+        return torch.squeeze(x, 2)
+
+
+class ImageFusion(nn.Module):
+    def __init__(self, mode="concat"):
+        super(ImageFusion, self).__init__()
+        self.mode = mode
+        if mode == "pet_weighted":
+            self.weights = [0.8, 0.2]
+            self.mode = "average"
+        elif mode == "ct_weighted":
+            self.weights = [0.2, 0.8]
+            self.mode = "average"
+        else:
+            self.weights = [0.5, 0.5]
+        if self.mode == "adaptive":
+            self.alpha = nn.Parameter(torch.tensor(0.5))
+            self.beta = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, pet, ct):
+        if self.mode == "concat":
+            return torch.cat([pet, ct], 1)
+        elif self.mode == "average":
+            return sum([w * img for w, img in zip(self.weights, [pet, ct])])
+        elif self.mode == "adaptive":
+            return self.alpha * pet + self.beta * ct
+        elif self.mode == "multiply":
+            return pet * ct
+        else:
+            raise NotImplementedError("Fusion mode not implemented!")
+
+
+class MMFusion(nn.Module):
+    def __init__(self, config, mode, channel, image_size, after_vit=False):
+        super(MMFusion, self).__init__()
+        self.mode = mode
+        if after_vit:
+            self.img_dims = (-1, channel, image_size)
+            self.fc_cli = nn.Linear(config["cli_size"], int(image_size*channel))
+        else:
+            self.img_dims = (-1, channel, image_size, image_size)
+            self.fc_cli = nn.Linear(config["cli_size"], int(image_size**2 * channel))
+
+        if self.mode == "adaptive":
+            self.alpha = nn.Parameter(torch.tensor(0.5))
+            self.beta = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, img, cli):
+        if self.mode == "summation":
+            cli_transformed = self.fc_cli(cli).view(self.img_dims)
+            return img + cli_transformed
+
+        elif self.mode == "concat":
+            cli_transformed = self.fc_cli(cli).view(self.img_dims)
+            # print("CLI: ", cli_transformed.shape, img.shape)
+            return torch.cat([img, cli_transformed], dim=1)
+
+        elif self.mode == "adaptive":
+            cli_transformed = self.fc_cli(cli).view(self.img_dims)
+            return self.alpha * img + self.beta * cli_transformed
+
+        elif self.mode == "multiply":
+            cli_transformed = self.fc_cli(cli).view(self.img_dims)
+            return img * cli_transformed
+        
+        else:
+            raise NotImplementedError("Fusion mode not implemented!")
+
 
 class SmallNetwork(nn.Module):
     def __init__(self, act_layer, z_dim):
@@ -131,40 +124,146 @@ class SmallNetwork(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-def init_backbone(name, pretrained, z_dim, act_layer, out_features=1):
+def init_backbone(name, pretrained, z_dim, act_layer):
+    feat_extractor = None
+    last_chn = None
     if name == "small":
         feat_extractor = SmallNetwork(act_layer, z_dim)
         last_chn = 256
-    elif name == "resnet18":
-        weights = ResNet18_Weights.DEFAULT if pretrained else None
-        backbone = resnet18(weights)
-        # backbone.fc = nn.Linear(512, out_features, bias=True)
-        backbone.conv1 = nn.Conv2d(z_dim, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-        feat_extractor = nn.Sequential(*list(backbone.children())[:-2])
-        last_chn = 512
-    elif name == "resnet50":
-        weights = ResNet50_Weights.DEFAULT if pretrained else None
-        backbone = resnet50(weights)
-        # backbone.fc = nn.Linear(512, out_features, bias=True)
+
+    elif name == "resnet":
+        weights = models.ResNet50_Weights.DEFAULT if pretrained else None
+        backbone = models.resnet50(weights)
         backbone.conv1 = nn.Conv2d(z_dim, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
         feat_extractor = nn.Sequential(*list(backbone.children())[:-2])
         last_chn = 2048
+
     elif name == "densenet":
-        weights = DenseNet121_Weights.DEFAULT if pretrained else None
-        backbone = densenet121(weights)
-        # backbone.classifier = nn.Linear(1024, out_features, bias=True)
+        weights = models.DenseNet121_Weights.DEFAULT if pretrained else None
+        backbone = models.densenet121(weights)
         backbone.features.conv0 = nn.Conv2d(z_dim, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
         feat_extractor = backbone.features
         last_chn = 1024
+
     elif name == "mobilenet":
-        weights = MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
-        backbone = mobilenet_v3_small(weights)
-        # backbone.classifier[-1] = nn.Linear(1024, out_features, bias=True)
+        weights = models.MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
+        backbone = models.mobilenet_v3_small(weights)
         backbone.features[0][0] = nn.Conv2d(z_dim, 16, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
         feat_extractor = backbone.features
         last_chn = 576
+
+    elif name == "swin":
+        weights = models.Swin_V2_B_Weights.DEFAULT if pretrained else None
+        backbone = models.swin_v2_b(weights)
+        backbone.features[0][0] = nn.Conv2d(z_dim, 128, kernel_size=(4, 4), stride=(4, 4))
+        feat_extractor = backbone.features
+        last_chn = 1024
+
+    else:
+        raise ValueError(f"Unsupported backbone name: {name}")
+
     return feat_extractor, last_chn
 
 def init_weights_he_normal(m):
     if isinstance(m, nn.Conv3d) or isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
         nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+
+
+class PETModel(nn.Module):
+    def __init__(self, config):
+        super(PETModel, self).__init__()
+        self.config = config
+
+        self.pet = True if "pet" in config["image_data"] else False
+        self.ct = True if "ct" in config["image_data"] else False
+        self.cli = True if config["cli_size"] > 0 else False
+
+        self.fusion = config["image_fusion"] if config["image_data"] == "pet+ct" else "no_fusion"
+        if self.fusion != "no_fusion":
+            self.fuser = ImageFusion(config["fusion_method"])
+
+        chns = 2 if self.fusion == "early" and config["fusion_method"] == "concat" else 1
+        self.slice_feats = FeatExZ(config, chns)
+        chns = 2 if self.fusion in ["early", "mid"] and config["fusion_method"] == "concat" else 1
+
+        if config["cli_size"] > 0:
+            self.mm_fuser1 = MMFusion(config, config["mm_fusion"], chns, config["image_size"])
+            if config["mm_fusion"] == "concat":
+                chns *= 2        
+        if config["backbone"] == "vit":
+            patch_size = 16
+            num_patches = (config["image_size"] // patch_size)**2
+            from model_vit2 import ViT
+            # self.spatial_feats = ViT(chns, patch_size, num_patches)
+            self.spatial_feats = ViT(chns, patch_size, config["image_size"])
+            last_chn = num_patches + 1
+        else:
+            self.spatial_feats, last_chn = init_backbone(config["backbone"], config["pretrained"], chns, config["activation"])
+
+        last_chn = last_chn*2 if self.fusion == "late" and config["fusion_method"] == "concat" else last_chn
+        # print("CHNS:", last_chn)
+        if config["cli_size"] > 0:
+            if config["backbone"] == "vit":
+                self.mm_fuser2 = MMFusion(config, config["mm_fusion"], last_chn, self.spatial_feats.dim, after_vit=True)
+            else:
+                self.mm_fuser2 = MMFusion(config, config["mm_fusion"], last_chn, int(config["image_size"]/32))
+            if config["mm_fusion"] == "concat":
+                last_chn *= 2
+        self.fc = nn.Linear(last_chn, 1, bias=True)
+        self.avg_pooling = nn.AdaptiveAvgPool2d(1) if config["backbone"] != "vit" else None
+        self.flat = nn.Flatten()
+        self.sigmoid = True if config["class_weight"] is None else False
+        
+        if not config["pretrained"]:
+            self.apply(init_weights_he_normal)
+        
+    def forward(self, inputs, return_feats=False):
+        pet = inputs[0]
+        ct = inputs[1]
+        if self.fusion == "early":
+            data = [self.fuser(pet=pet, ct=ct)]
+        else:
+            data = []
+            if self.pet:
+                data.append(pet)
+            if self.ct:
+                data.append(ct)
+
+        data2d = [self.slice_feats(d) for d in data]
+        
+        if self.cli:
+            cli = inputs[-1]
+            if self.fusion == "mid":
+                data2d = [self.fuser(pet=data2d[0], ct=data2d[1])]
+            data2d = [self.mm_fuser1(cli=cli, img=d) for d in data2d]
+
+            # for d in data2d:
+                # print("D2", d.shape)
+        
+        data1d = [self.spatial_feats(d) for d in data2d]
+        if self.config["backbone"] == "swin":
+            data1d = [d.permute(0, 3, 1, 2) for d in data1d]
+        
+        if self.cli:
+            cli = inputs[-1]
+            if self.fusion == "late":
+                data1d = [self.fuser(pet=data1d[0], ct=data1d[1])]
+            # for d in data1d:
+            #     print("D1", d.shape)
+            # print(cli.shape, data1d[0].shape)
+            data1d = [self.mm_fuser2(cli=cli, img=d) for d in data1d]
+            
+        assert len(data1d) == 1
+        if self.avg_pooling is None:
+            out = torch.mean(data1d[0], -1)
+        else:
+            out = self.flat(self.avg_pooling(data1d[0]))
+        
+        flat_out = self.fc(out)
+        
+        if self.sigmoid:
+            flat_out = torch.sigmoid(flat_out)
+        
+        if return_feats:
+            return flat_out, out
+        return flat_out

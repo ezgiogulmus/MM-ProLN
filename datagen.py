@@ -11,6 +11,7 @@ import torchio as tio
 class ProstateImages(torch.utils.data.Dataset):
     def __init__(self, config, df, partition, split_idx=None):
         self.config = config
+        self.cli_only = True if config["image_data"] is None or config["image_data"] in ["None", "none"] else False
         self.image_size = config["image_size"]
         self.img_folder = config["image_folder"]
         self.cli_size = config["cli_size"]
@@ -32,8 +33,6 @@ class ProstateImages(torch.utils.data.Dataset):
                 tio.transforms.RandomSpike(): .25,
             }): .8
         })
-        elif partition == "val":
-            self.augmentation = None
         else:
             self.augmentation = None
 
@@ -42,6 +41,11 @@ class ProstateImages(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         pt_id = self.df["idx"].iloc[index]
+        label = torch.FloatTensor(np.array(self.df[self.target_var][self.df["idx"] == pt_id].item())[np.newaxis])
+        cli_data = torch.squeeze(torch.Tensor(self.df[self.df["idx"] == pt_id].drop(["idx", self.target_var], axis=1).values)) if self.cli_size > 0 else None
+        if self.cli_only:
+            data = [torch.zeros(1), torch.zeros(1), torch.zeros(1), cli_data]
+            return data, label, pt_id
         pet_arr = self.get_img(os.path.join(self.img_folder, str(pt_id), "PET"))/255.
         ct_arr = self.get_img(os.path.join(self.img_folder, str(pt_id), "CT"))/255.
         seg_arr = self.get_img(os.path.join(self.img_folder, str(pt_id), "SEG"))
@@ -51,11 +55,9 @@ class ProstateImages(torch.utils.data.Dataset):
             ct_arr = self.augmentation(ct_arr)
         
         data = [pet_arr, ct_arr, seg_arr]
-        if self.cli_size != 0:
-            data.append(torch.squeeze(torch.Tensor(self.df[self.df["idx"] == pt_id].drop(["idx", self.target_var], axis=1).values)))
+        if self.cli_size > 0:
+            data.append(cli_data)
 
-        label = torch.FloatTensor(np.array(self.df[self.target_var][self.df["idx"] == pt_id].item())[np.newaxis])
-        
         return data, label, pt_id
     
     def get_img(self, path):
@@ -179,10 +181,14 @@ class ProstateData:
         return merged_train, merged_test
     
     def selected_feats(self, group):
-        cols =  self.selected_cols(group)
+        if group is None or group in ["none", "None"]:
+            selected_vars_train = pd.concat([self.train_ids, self.label_train], axis=1)
+            selected_vars_test = pd.concat([self.test_ids, self.label_test], axis=1)
+        else:
+            cols =  self.selected_cols(group)
 
-        selected_vars_train = pd.concat([self.train_ids, self.all_feats_train[cols], self.label_train], axis=1)
-        selected_vars_test = pd.concat([self.test_ids, self.all_feats_test[cols], self.label_test], axis=1)
+            selected_vars_train = pd.concat([self.train_ids, self.all_feats_train[cols], self.label_train], axis=1)
+            selected_vars_test = pd.concat([self.test_ids, self.all_feats_test[cols], self.label_test], axis=1)
 
         return selected_vars_train, selected_vars_test
 
