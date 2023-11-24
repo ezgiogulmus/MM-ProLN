@@ -63,15 +63,11 @@ class ImageFusion(nn.Module):
 
 
 class MMFusion(nn.Module):
-    def __init__(self, config, mode, channel, image_size, after_vit=False):
+    def __init__(self, config, mode, channel, image_size):
         super(MMFusion, self).__init__()
         self.mode = mode
-        if after_vit:
-            self.img_dims = (-1, channel, image_size)
-            self.fc_cli = nn.Linear(config["cli_size"], int(image_size*channel))
-        else:
-            self.img_dims = (-1, channel, image_size, image_size)
-            self.fc_cli = nn.Linear(config["cli_size"], int(image_size**2 * channel))
+        self.img_dims = (-1, channel, image_size, image_size)
+        self.fc_cli1 = nn.Linear(config["cli_size"], int(image_size**2 * channel))
 
         if self.mode == "adaptive":
             self.alpha = nn.Parameter(torch.tensor(0.5))
@@ -79,20 +75,20 @@ class MMFusion(nn.Module):
 
     def forward(self, img, cli):
         if self.mode == "summation":
-            cli_transformed = self.fc_cli(cli).view(self.img_dims)
+            cli_transformed = self.fc_cli1(cli).view(self.img_dims)
             return img + cli_transformed
 
         elif self.mode == "concat":
-            cli_transformed = self.fc_cli(cli).view(self.img_dims)
+            cli_transformed = self.fc_cli1(cli).view(self.img_dims)
             # print("CLI: ", cli_transformed.shape, img.shape)
             return torch.cat([img, cli_transformed], dim=1)
 
         elif self.mode == "adaptive":
-            cli_transformed = self.fc_cli(cli).view(self.img_dims)
+            cli_transformed = self.fc_cli1(cli).view(self.img_dims)
             return self.alpha * img + self.beta * cli_transformed
 
         elif self.mode == "multiply":
-            cli_transformed = self.fc_cli(cli).view(self.img_dims)
+            cli_transformed = self.fc_cli1(cli).view(self.img_dims)
             return img * cli_transformed
         
         else:
@@ -152,12 +148,12 @@ def init_backbone(name, pretrained, z_dim, act_layer):
         feat_extractor = backbone.features
         last_chn = 576
 
-    elif name == "swin":
-        weights = models.Swin_V2_B_Weights.DEFAULT if pretrained else None
-        backbone = models.swin_v2_b(weights)
-        backbone.features[0][0] = nn.Conv2d(z_dim, 128, kernel_size=(4, 4), stride=(4, 4))
+    elif name == "efficientnet":
+        weights = models.EfficientNet_V2_M_Weights.DEFAULT if pretrained else None
+        backbone = models.efficientnet_v2_m(weights)
+        backbone.features[0][0] = nn.Conv2d(z_dim, 24, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
         feat_extractor = backbone.features
-        last_chn = 1024
+        last_chn = 1280
 
     else:
         raise ValueError(f"Unsupported backbone name: {name}")
@@ -190,27 +186,16 @@ class PETModel(nn.Module):
             self.mm_fuser1 = MMFusion(config, config["mm_fusion"], chns, config["image_size"])
             if config["mm_fusion"] == "concat":
                 chns *= 2        
-        if config["backbone"] == "vit":
-            patch_size = 16
-            num_patches = (config["image_size"] // patch_size)**2
-            from model_vit2 import ViT
-            # self.spatial_feats = ViT(chns, patch_size, num_patches)
-            self.spatial_feats = ViT(chns, patch_size, config["image_size"])
-            last_chn = num_patches + 1
-        else:
-            self.spatial_feats, last_chn = init_backbone(config["backbone"], config["pretrained"], chns, config["activation"])
+        self.spatial_feats, last_chn = init_backbone(config["backbone"], config["pretrained"], chns, config["activation"])
 
         last_chn = last_chn*2 if self.fusion == "late" and config["fusion_method"] == "concat" else last_chn
-        # print("CHNS:", last_chn)
+        
         if config["cli_size"] > 0:
-            if config["backbone"] == "vit":
-                self.mm_fuser2 = MMFusion(config, config["mm_fusion"], last_chn, self.spatial_feats.dim, after_vit=True)
-            else:
-                self.mm_fuser2 = MMFusion(config, config["mm_fusion"], last_chn, int(config["image_size"]/32))
+            self.mm_fuser2 = MMFusion(config, config["mm_fusion"], last_chn, int(config["image_size"]/32))
             if config["mm_fusion"] == "concat":
                 last_chn *= 2
         self.fc = nn.Linear(last_chn, 1, bias=True)
-        self.avg_pooling = nn.AdaptiveAvgPool2d(1) if config["backbone"] != "vit" else None
+        self.avg_pooling = nn.AdaptiveAvgPool2d(1)
         self.flat = nn.Flatten()
         self.sigmoid = True if config["class_weight"] is None else False
         
@@ -236,9 +221,6 @@ class PETModel(nn.Module):
             if self.fusion == "mid":
                 data2d = [self.fuser(pet=data2d[0], ct=data2d[1])]
             data2d = [self.mm_fuser1(cli=cli, img=d) for d in data2d]
-
-            # for d in data2d:
-                # print("D2", d.shape)
         
         data1d = [self.spatial_feats(d) for d in data2d]
         if self.config["backbone"] == "swin":
@@ -248,9 +230,6 @@ class PETModel(nn.Module):
             cli = inputs[-1]
             if self.fusion == "late":
                 data1d = [self.fuser(pet=data1d[0], ct=data1d[1])]
-            # for d in data1d:
-            #     print("D1", d.shape)
-            # print(cli.shape, data1d[0].shape)
             data1d = [self.mm_fuser2(cli=cli, img=d) for d in data1d]
             
         assert len(data1d) == 1
@@ -267,3 +246,4 @@ class PETModel(nn.Module):
         if return_feats:
             return flat_out, out
         return flat_out
+

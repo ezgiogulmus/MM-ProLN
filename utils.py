@@ -5,13 +5,9 @@ import time
 import json
 from tqdm import tqdm
 import torch
-from collections import Counter
-from sklearn.svm import SVC
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, GradientBoostingClassifier, AdaBoostClassifier
-from sklearn.metrics import roc_auc_score, accuracy_score
+
 from sklearn.metrics import matthews_corrcoef, accuracy_score, f1_score, recall_score, roc_auc_score, precision_score
-# from torcheval.metrics import AUC, 
+
 from torcheval.metrics import BinaryAccuracy, BinaryAUROC
 from torch.nn.utils import clip_grad_norm_
 
@@ -80,7 +76,7 @@ def create_run(config):
     
     return config
 
-def loop(config, loader, model, criterion, optimizer=None, training=True, return_preds=False, threshold=0.5):
+def loop(config, loader, model, criterion, optimizer=None, training=True, return_preds=False):
     avg_meter = AverageMeter()
 
     all_targets, all_outputs = [], []
@@ -92,7 +88,6 @@ def loop(config, loader, model, criterion, optimizer=None, training=True, return
 
         with torch.set_grad_enabled(training):
             output = model(inputs)
-            # print(list(zip(output.detach().cpu().numpy(), target.detach().cpu().numpy())))
             loss = criterion(output, target)
 
         if training:
@@ -107,11 +102,6 @@ def loop(config, loader, model, criterion, optimizer=None, training=True, return
         [all_outputs.append(o.item()) for o in output.detach().cpu()]
     log = compute_all_scores([all_targets, all_outputs])
     log["loss"] = avg_meter.avg
-    # log = {
-    #     "loss": avg_meter.avg,
-    #     "acc": accuracy_score(np.array(all_outputs)>threshold, all_targets),
-    #     "auc": roc_auc_score(all_targets, y_score=all_outputs),
-    # }
     if return_preds:
         return log, [all_targets, all_outputs]
     return log
