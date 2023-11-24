@@ -22,6 +22,7 @@ def main(config=None):
         print("Model directory is ", config["model_dir"])
         
     else:
+        config["run_name"] = str(np.random.randint(100)) if config["run_name"] is None else config["run_name"]
         config["run_name"] = config["backbone"] + "_" + config["image_data"] + "_" + config["image_fusion"] + "_" + config["fusion_method"] + "_" + config["clinical_group"] + "_" + config["mm_fusion"] + config["run_name"]
         config = utils.create_run(config)
 
@@ -179,8 +180,8 @@ def parse_args():
     parser.add_argument('--debugging', default=False, action="store_true")
     parser.add_argument('--run_config_file', default=None)
     parser.add_argument('--project_name', default=None)
-    parser.add_argument('--data_folder', default="./data/")
-    parser.add_argument('--image_folder', default="./data/ProstateData/")
+    parser.add_argument('--data_folder', default="../data/")
+    parser.add_argument('--image_folder', default="../data/ProstateData/")
     parser.add_argument('--load_from', default=None)
 
     parser.add_argument('--class_weight', default=2, type=float)
@@ -191,7 +192,7 @@ def parse_args():
     parser.add_argument('--fusion_method', default="average", choices=["concat", "adaptive", "pet_weighted", "ct_weighted", "average", "multiply"])
     parser.add_argument('--mm_fusion', default="concat", choices=["concat", "adaptive", "multiply", "summation"])
     parser.add_argument('--image_fusion', default="early", choices=["early", "mid", "late"])
-    parser.add_argument('--backbone', default="small", choices=['small', 'vit', "swin","efficientnet", "resnet", "densenet", "mobilenet"])
+    parser.add_argument('--backbone', default="small", choices=['small', "efficientnet", "resnet", "densenet", "mobilenet"])
     parser.add_argument('--pretrained', default=True, action='store_false')
     parser.add_argument('--clinical_group', default="clinical+pet", choices=["None", "clinical", "clinical+radiomics", "clinical+pet", "clinical+ct"])
     parser.add_argument('--image_data', default="pet+ct", choices=["pet", "ct", "pet+ct", "None"])
