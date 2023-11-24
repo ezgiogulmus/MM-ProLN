@@ -1,4 +1,5 @@
 # Integrating PET/CT, Radiomics and Clinical Data: An Advanced Multi-Modal Approach for Lymph Node Metastasis Prediction
+![Main Figure](./MainFig.png)
 
 ## Introduction
 MM-ProLN is an artificial intelligence model that integrates PET/CT fusion images, clinical data, and radiomics features. It was developed using a combination of 3D slice-wise and 2D spatial feature extraction to provide an advanced multimodal approach for lymph node metastasis prediction.
@@ -31,10 +32,10 @@ For a comprehensive list of all command-line arguments and their descriptions, p
   ```
 
 ## Contribution
-Contributions are welcome! If you have suggestions or want to contribute to the project, please feel free to open an issue or a pull request.
+Contributions are welcome! If you have suggestions or want to contribute to the project, please feel free to open an [issue](https://github.com/ezgiogulmus/MM-ProLN/issues) or a [pull request](https://github.com/ezgiogulmus/MM-ProLN/pulls).
 
 ## License
-This project is licensed under the MIT License.
+This project is licensed under the [MIT License](./LICENSE).
 
 ## Contact
-For questions and feedback, please reach out to ezgiogulmus@gmail.com.
+For questions and feedback, please reach out to [ezgiogulmus@gmail.com](mailto:ezgiogulmus@gmail.com).
