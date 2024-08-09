@@ -1,7 +1,6 @@
 import pandas as pd
 import os
 import numpy as np
-import json
 from PIL import Image
 import torch
 import torchvision.transforms as T
@@ -85,7 +84,7 @@ class ProstateImages(torch.utils.data.Dataset):
 
 
 class ProstateData:
-    def __init__(self, config, encoding=True):
+    def __init__(self, config):
         self.config = config
 
         self.target = "nod"

@@ -6,6 +6,24 @@ from torch.nn import functional as F
 from torchvision import models
 
 
+class MLP(nn.Module):
+    def __init__(self, config, hidden_dim=1024):
+        super(MLP, self).__init__()
+        self.fc1 = nn.Linear(config["cli_size"], hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, 1)
+        self.sigmoid = True if config["class_weight"] is None else False
+
+    def forward(self, inputs):
+        x = inputs[-1]
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        if self.sigmoid:
+            return torch.sigmoid(x)
+        return x
+    
+    
 class FeatExZ(nn.Module):
     def __init__(self, config, channels):
         super(FeatExZ, self).__init__()
@@ -127,12 +145,19 @@ def init_backbone(name, pretrained, z_dim, act_layer):
         feat_extractor = SmallNetwork(act_layer, z_dim)
         last_chn = 256
 
-    elif name == "resnet":
+    elif name == "resnet50":
         weights = models.ResNet50_Weights.DEFAULT if pretrained else None
         backbone = models.resnet50(weights)
         backbone.conv1 = nn.Conv2d(z_dim, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
         feat_extractor = nn.Sequential(*list(backbone.children())[:-2])
         last_chn = 2048
+
+    elif name == "resnet18":
+        weights = models.ResNet18_Weights.DEFAULT if pretrained else None
+        backbone = models.resnet18(weights)
+        backbone.conv1 = nn.Conv2d(z_dim, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        feat_extractor = nn.Sequential(*list(backbone.children())[:-2])
+        last_chn = 512
 
     elif name == "densenet":
         weights = models.DenseNet121_Weights.DEFAULT if pretrained else None
@@ -154,6 +179,34 @@ def init_backbone(name, pretrained, z_dim, act_layer):
         backbone.features[0][0] = nn.Conv2d(z_dim, 24, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
         feat_extractor = backbone.features
         last_chn = 1280
+
+    elif name == "efficientnetb1":
+        weights = models.EfficientNet_B1_Weights.DEFAULT if pretrained else None
+        backbone = models.efficientnet_b1(weights)
+        backbone.features[0] = nn.Conv2d(z_dim, 32, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+        feat_extractor = backbone.features
+        last_chn = 1280
+
+    elif name == "mnasnet":
+        weights = models.MNASNet0_5_Weights.DEFAULT if pretrained else None
+        backbone = models.mnasnet0_5(weights)
+        backbone.layers[0] = nn.Conv2d(z_dim, 16, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+        feat_extractor = backbone.layers
+        last_chn = 1280
+
+    elif name == "vgg":
+        weights = models.VGG11_Weights.DEFAULT if pretrained else None
+        backbone = models.vgg11(weights)
+        backbone.features[0] = nn.Conv2d(z_dim, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+        feat_extractor = backbone.features
+        last_chn = 512
+
+    elif name == "shufflenet":
+        weights = models.ShuffleNet_V2_X0_5_Weights.DEFAULT if pretrained else None
+        backbone = models.shufflenet_v2_x0_5(weights)
+        backbone.conv1[0] = nn.Conv2d(z_dim, 24, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+        feat_extractor = nn.Sequential(*list(backbone.children())[:-1])
+        last_chn = 1024
 
     else:
         raise ValueError(f"Unsupported backbone name: {name}")
@@ -201,7 +254,7 @@ class PETModel(nn.Module):
         
         if not config["pretrained"]:
             self.apply(init_weights_he_normal)
-        
+    
     def forward(self, inputs, return_feats=False):
         pet = inputs[0]
         ct = inputs[1]
@@ -246,4 +299,3 @@ class PETModel(nn.Module):
         if return_feats:
             return flat_out, out
         return flat_out
-
