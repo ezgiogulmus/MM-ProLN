@@ -30,7 +30,7 @@ pip install -e .
 
 ## Repository Structure
 - `src/`: Contains the main source code.
-- `data/`: Contains CSV files with clinical and radiomics data for training and testing. PET and CT images will be available after submission at [Google Drive](https://drive.google.com/). Download the images and extract them into this directory.
+- `data/`: Contains CSV files with clinical and radiomics data for training and testing. PET and CT images will be available after submission at [Google Drive]([https://drive.google.com/drive/folders/1i8E_MfmsDxoY7WrlX1fQqdn-V2NYHOO-?usp=sharing)]. Download the images and extract them into this directory.
 
 ## Usage
 Use the following command to train the model:
